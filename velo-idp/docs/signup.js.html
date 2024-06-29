@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: signup.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: signup.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>import QRCode from 'qrcode';
+
+/**
+ * Error returned when the state of the signup flow is invalid for the current operation.
+ *
+ * @extends {Error}
+ * @property {string} message - The error message.
+ * @property {string} name - The error name.
+ */
+export class InvalidStateError extends Error {
+    /**
+     * Create a new InvalidStateError.
+     *
+     * @param {string} message The error message.
+     */
+    constructor(message) {
+        super(message);
+        this.name = 'InvalidStateError';
+    }
+}
+
+/**
+ * Error returned when a username already exists.
+ *
+ * @extends {Error}
+ * @property {string} message - The error message.
+ * @property {string} name - The error name.
+ */
+export class UsernameExistsError extends Error {
+    /**
+     * Create a new UsernameExistsError.
+     *
+     * @param {string} message The error message.
+     */
+    constructor(message) {
+        super(message);
+        this.name = 'UsernameExistsError';
+    }
+}
+
+/**
+ * Error returned when a precondition fails (412).
+ *
+ * Precondition failures happen from grossly illegal inputs, or permit preconditions. Permit preconditions include
+ * things such as their expiration being reached (which is most common).
+ *
+ * The purpose of expirations isn't preventing replay attacks, as permits are single use, but just an additional layer
+ * of security.
+ *
+ * Encountered:
+ * - The permit has expired.
+ * - Maximum attempts have been reached.
+ *
+ * These errors are meant to be opaque to prevent leaking information about the system, the message is always the same.
+ * The contents of the error also do not impact the state in any way, if you ever receive this error you will need to
+ * restart the flow.
+ *
+ * @extends {Error}
+ * @property {string} message - The error message.
+ * @property {string} name - The error name.
+ */
+export class PreconditionFailedError extends Error {
+    /**
+     * Create a new PreconditionFailedError.
+     *
+     * Precondition failures are meant to be opaque to prevent leaking information about the system.
+     */
+    constructor() {
+        super('Precondition failed.');
+        this.name = 'PreconditionFailedError';
+    }
+}
+
+/**
+ * Error returned when an HTTP request fails.
+ *
+ * @extends {Error}
+ * @property {string} message - The error message.
+ * @property {string} name - The error name.
+ * @property {number} status - The HTTP status code.
+ */
+export class HttpError extends Error {
+    /**
+     * Create a new HttpError.
+     *
+     * @param {number} status The HTTP status code.
+     */
+    constructor(status) {
+        super('HttpError status: ' + status);
+        this.name = 'HttpError';
+        this.status = status;
+    }
+}
+
+/**
+ * @typedef {
+ *     "TooFewCharacters"  |
+ *     "TooManyCharacters" |
+ *     "NeedsSpecial"      |
+ *     "NeedsNumeric"      |
+ *     "NeedsCapital"      |
+ *     "NeedsLowercase"    |
+ *     "IllegalCharacter"
+ * } InsufficientPasswordVariant
+ */
+
+/**
+ * Error returned when a password is insufficiently complex.
+ *
+ * @property {InsufficientPasswordVariant} variant - How the password is insufficiently complex.
+ * @property {number} [value] - The associated value of the error, this is only included with the
+ *                              "TooFewCharacters" and "TooManyCharacters" variants.
+ *
+ * @extends {Error}
+ */
+export class InsufficientPassword extends Error {
+    /**
+     * Create a new PasswordInvalidError.
+     * @param {InsufficientPasswordVariant} variant
+     * @param {number} [value]
+     */
+    constructor(variant, value) {
+        super(`Password invalid: ${variant}${value ? `: ${value}` : ''}`);
+        this.name = 'InsufficientPassword';
+        this.variant = variant;
+        this.value = value;
+    }
+}
+
+const STATES = {
+    INIT: 'init',
+    PASSWORD: 'password',
+    SETUP_FIRST_MFA: 'setup_first_mfa',
+    SETUP_MFA_OR_ISSUE_TOKEN: 'setup_mfa_or_issue_token',
+    VERIFY_TOTP: 'verify_totp',
+    VERIFY_PLAIN_OTP: 'verify_plain_otp',
+    TERMINAL: ''
+};
+
+/**
+ * @template T
+ * @typedef {Object} ApiResponse
+ *
+ * @property {T} 0 The response data.
+ * @property {Array&lt;number>} 1 The updated permit.
+ */
+
+/**
+ * @class SignupFlow
+ * @classdesc A class that provides a high-level interface for the signup API.
+ *
+ * @property {string} baseUrl The base URL for the signup API.
+ * @property {?Array&lt;number>} permit The current permit.
+ * @property {string} state The current state of the signup flow.
+ * @property {function(string, Object): Promise&lt;Response>} fetch The fetch function to use.
+ *
+ * @example
+ * // Establish a new SignupFlow
+ * let signup_flow = new SignupFlow("https://some-url-to-velo-idp.com");
+ *
+ * // Say hello, requesting a username
+ * try { await signup_flow.helloSignup("username"); } catch (e) {
+ *     if (e instanceof UsernameExistsError) {
+ *         console.log("Username already exists.");
+ *     }
+ *     return;
+ * };
+ *
+ * // Set the password
+ * try {
+ *     await signup_flow.setPassword("Password123!");
+ * } catch (e) {
+ *     if (e instanceof InsufficientPassword) {
+ *         console.log(`Try a better pass, reason: ${e.variant}`);
+ *         return;
+ *     } else if (e instanceof PreconditionFailedError) {
+ *         console.log("Permit expired. Start over");
+ *         return;
+ *     }
+ * };
+ *
+ * // Set our first MFA method, TOTP is always best
+ * const qr_code = await signup_flow.setupTotp();
+ * // display the QR code to the user, so they can scan it ...
+ *
+ * // Verify the TOTP code
+ * if (await signup_flow.verifyTotp("12345678")) {
+ *     console.log("TOTP verified!");
+ * } else {
+ *     console.log("TOTP failed verification.");
+ *     // user should retry, they have 5 attempts by default
+ *     return;
+ * }
+ *
+ * // Setup another form of MFA, SMS OTP
+ * await signup_flow.setupSmsOtp("5555555555");
+ *
+ * // Verify the SMS OTP
+ * if (await signup_flow.verifyOtp("111111")) {
+ *     console.log("SMS OTP verified!");
+ * } else {
+ *     console.log("SMS OTP failed verification.");
+ *     // user should retry, they have 5 attempts by default
+ *     return;
+ * }
+ *
+ * // At any point after the first MFA method we could have issued
+ * // a token. We can set up Email as another MFA method, but we'll
+ * // just finalize the signup process here.
+ * const token = await signup_flow.issueToken();
+ *
+ * // now our signup process is complete, and we are logged in with
+ * // the token.
+ * console.log("Token:", token);
+ *
+ */
+export class SignupFlow {
+    /**
+     * Create a new SignupSDK instance.
+     *
+     * @param {string} baseUrl The base URL for the signup API.
+     * @param {function(string, Object): Promise&lt;Response>} [fetch=window.fetch] The fetch function to use.
+     */
+    constructor(baseUrl, fetch = window.fetch.bind(window)) {
+        this.baseUrl = baseUrl;
+        this.permit = null;
+        this.state = STATES.INIT;
+        this.fetch = fetch;
+    }
+
+    /**
+     * Check that the current state is correct for the operation.
+     *
+     * @param {string | Array&lt;string>} expectedState
+     * @param {string} errorMessage
+     * @returns {void}
+     *
+     * @throws {InvalidStateError} If the current state is invalid for the operation.
+     * @private
+     */
+    _checkState(expectedState, errorMessage) {
+        if (Array.isArray(expectedState) &amp;&amp; !expectedState.includes(this.state)) {
+            throw new InvalidStateError(errorMessage);
+        } else if (this.state !== expectedState) {
+            throw new InvalidStateError(errorMessage);
+        }
+    }
+
+    /**
+     * Fetch wrapper to handle errors.
+     *
+     * @param {Promise&lt;Response>} invocation The fetch invocation.
+     * @returns {Promise&lt;Response>} The response.
+     *
+     * @throws {PreconditionFailedError} If the permit has expired or the maximum attempts have been reached.
+     * @throws {HttpError} If the HTTP request fails.
+     * @private
+     */
+    _fetch_wrapper(invocation) {
+        return invocation.then((response) => {
+            if (response.ok) {
+                return response
+            }
+            // 401 should never happen, sdk prevents against illegal state transitions
+            if (response.status === 412) {
+                throw new PreconditionFailedError();
+            } else {
+                throw new HttpError(response.status);
+            }
+        })
+    }
+
+    /**
+     * Fetch with the current permit.
+     *
+     * @param {Object} args The arguments to send.
+     * @returns {Promise&lt;Response>}
+     *
+     * @throws {PreconditionFailedError} If the permit has expired or the maximum attempts have been reached.
+     * @throws {HttpError} If the HTTP request fails.
+     * @private
+     */
+    _fetch_with_permit(args) {
+        return this._fetch_wrapper(this.fetch(`${this.baseUrl}/signup`, {
+            method: 'POST',
+            body: JSON.stringify({
+                args: args,
+                permit: this.permit
+            }),
+        }))
+    }
+
+    /**
+     * Start the signup process by sending the username.
+     *
+     * ## Transitions To:
+     *
+     * - [Set Password]{@link SignupFlow.setPassword} - If the username is available, otherwise an error is thrown.
+     *
+     * @param {string} username The username to sign up with.
+     * @returns {Promise&lt;void>}
+     *
+     * @throws {UsernameExistsError} If the username already exists.
+     * @throws {HttpError} If the HTTP request fails.
+     */
+    async helloSignup(username) {
+        const response = await this._fetch_wrapper(this.fetch(`${this.baseUrl}/signup`, {
+            method: 'POST',
+            body: JSON.stringify({
+                args: {
+                    hello_signup: { username }
+                }
+            }),
+        }));
+
+        /**
+         * @typedef {Object} HelloSignupError
+         * @property {bool} username_exists error message if the username already exists.
+         */
+
+        /**
+         * @type {ApiResponse&lt;?HelloSignupError>}
+         */
+        const data = await response.json();
+        if (data[0] !== null) {
+            throw new UsernameExistsError('Username already exists.');
+        } else {
+            this.permit = data[1];
+            this.state = STATES.PASSWORD;
+        }
+    }
+
+    /**
+     * Set the password for the user.
+     *
+     * ## Transitions To:
+     *
+     * - [Setup TOTP]{@link SignupFlow.setupTotp}
+     * | [Setup SMS OTP]{@link SignupFlow.setupSmsOtp}
+     * | [Setup Email OTP]{@link SignupFlow.setupEmailOtp} - If the password is sufficiently complex.
+     * - [Set Password]{@link SignupFlow.setPassword} - If the password is insufficiently complex the user should
+     * be prompted to enter a new password. See {@link InsufficientPassword} for details on the requirements.
+     *
+     * ## Transitioned From:
+     *
+     * - [Hello Signup]{@link SignupFlow.helloSignup} - If the username is available.
+     * - [Set Password]{@link SignupFlow.setPassword} - If the password was insufficiently complex.
+     *
+     * @param {string} password The password to set.
+     * @returns {Promise&lt;void>}
+     *
+     * @throws {InvalidStateError} If the current state is invalid for this operation.
+     * @throws {InsufficientPassword} If the password is insufficiently complex.
+     * @throws {PreconditionFailedError} If the permit from `helloSignup` has expired.
+     * @throws {HttpError} If the HTTP request fails.
+     */
+    async setPassword(password) {
+        this._checkState(STATES.PASSWORD, 'Invalid state for setting password.')
+        const response = await this._fetch_with_permit({password: { password: password } } );
+
+        /**
+         * @typedef {Object} PasswordLengthError
+         * @property {?number} TooFewChars length of the received password. Must be at least 8 characters.
+         * @property {?number} TooManyChars length of the received password. Must not be over 72 characters.
+         */
+
+        /**
+         * @typedef {
+         *     "NeedsSpecial"      |
+         *     "NeedsNumeric"      |
+         *     "NeedsCapital"      |
+         *     "NeedsLowercase"    |
+         *     "IllegalCharacter"
+         * } PasswordComplexityError
+         */
+
+        /**
+         * @typedef {Object} InvalidPasswordResponse
+         * @property {PasswordLengthError | PasswordComplexityError} invalid_password
+         */
+
+        /**
+         * @type {ApiResponse&lt;?InvalidPasswordResponse>} SetPasswordResponse
+         */
+        const data = await response.json();
+
+        // make sure we update the permit prior to possibly throwing so that the user can retry
+        this.permit = data[1];
+
+        if (data[0] !== null) {
+            // check cases, throw associated error
+            switch (Object.keys(data[0].invalid_password)[0]) {
+                case 'TooFewChars':
+                    throw new InsufficientPassword('TooFewCharacters', data[0].invalid_password['TooFewChars']);
+                case 'TooManyChars':
+                    throw new InsufficientPassword('TooManyCharacters', data[0].invalid_password['TooManyChars']);
+                default:
+                    throw new InsufficientPassword(Object.keys(data[0].invalid_password)[0]);
+            }
+        }
+
+        this.state = STATES.SETUP_FIRST_MFA;
+    }
+
+    /**
+     * Setup TOTP as an MFA method.
+     *
+     * ## Transitions To:
+     *
+     * - [Verify TOTP]{@link SignupFlow.verifyTotp} - To verify that the users authenticator is set up correctly.
+     *
+     * ## Transitioned From:
+     *
+     * - [Set Password]{@link SignupFlow.setPassword} - If the password was sufficiently complex.
+     * - {@link SignupFlow.verifyOtp|Verify OTP} - If the OTP was valid (for setting up SMS or Email OTP).
+     *
+     * @returns {Promise&lt;string>} A promise that resolves to a data URL representing the QR code.
+     *
+     * @throws {InvalidStateError} If the current state is invalid for this operation.
+     * @throws {PreconditionFailedError} If the permit from either `setPassword` or any verification state has expired.
+     * @throws {HttpError} If the HTTP request fails.
+     *
+     */
+    async setupTotp() {
+        let response;
+
+        switch (this.state) {
+            case STATES.SETUP_FIRST_MFA:
+                response = await this._fetch_with_permit({setup_first_mfa: {kind: {Totp: null}}});
+                break;
+            case STATES.SETUP_MFA_OR_ISSUE_TOKEN:
+                response = await this._fetch_with_permit({setup_mfa_or_issue_token: {kind: {Totp: null}}});
+                break;
+            default:
+                throw new InvalidStateError('Invalid state for TOTP setup.');
+        }
+
+        /**
+         * @typedef {Object} SetupTotpResponse
+         * @property {string} setup_totp The TOTP setup URL.
+         */
+
+        /**
+         * @type {ApiResponse&lt;SetupTotpResponse>}
+         */
+        const data = await response.json();
+        // Extract the TOTP setup URL and provide it to the user for scanning
+        const totpSetupUrl = data[0].setup_totp;
+        this.permit = data[1];
+
+        // Generate QR code
+        let qrCode;
+        try {
+            qrCode = QRCode.toDataURL(totpSetupUrl);
+        } catch (err) {
+            // this is hopefully infallible, further review of the implementation is needed.
+            console.error('Failed to generate QR code', err);
+            throw err;
+        }
+
+        this.state = STATES.VERIFY_TOTP;
+
+        return qrCode;
+    }
+
+    /**
+     * Verify the TOTP code.
+     *
+     * ## Transitions To:
+     *
+     * - [Issue Token]{@link SignupFlow.issueToken}
+     * | [Setup SMS OTP]{@link SignupFlow.setupSmsOtp}
+     * | [Setup Email OTP]{@link SignupFlow.setupEmailOtp} - If the TOTP code is valid the user can either finalize the
+     * signup process or set up another MFA method.
+     * - [Verify TOTP]{@link SignupFlow.verifyTotp} - If the TOTP code is invalid, the user should be prompted to retry,
+     * by default, they have 5 attempts.
+     *
+     * ## Transitioned From:
+     *
+     * - [Setup TOTP]{@link SignupFlow.setupTotp}
+     * - [Verify TOTP]{@link SignupFlow.verifyTotp} - If the TOTP code was invalid the user should be prompted to retry.
+     *
+     * @param {string} totp The 8 digit TOTP code to verify.
+     * @returns {Promise&lt;boolean>} A promise that resolves to true if the TOTP code is valid, false otherwise.
+     * If false, the user should be prompted to enter the code again.
+     *
+     * @throws {InvalidStateError} If the current state is invalid (the previous state was not `setupTotp`).
+     * @throws {PreconditionFailedError} If the permit from `setupTotp` has expired or the maximum attempts have been
+     * reached.
+     * @throws {HttpError} If the HTTP request fails.
+     */
+    async verifyTotp(totp) {
+        this._checkState(STATES.VERIFY_TOTP, 'Invalid state for TOTP verification.')
+        const response = await this._fetch_with_permit({verify_totp: {guess: totp}});
+
+        /**
+         * @typedef {Object} VerifyTotpResponse
+         * @property {bool} verify_totp Whether the TOTP code is valid.
+         */
+
+        /**
+         * @type {ApiResponse&lt;VerifyTotpResponse>}
+         */
+        const data = await response.json();
+
+        this.permit = data[1];
+
+        if (data[0].verify_totp) {
+            this.state = STATES.SETUP_MFA_OR_ISSUE_TOKEN;
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * @typedef {Object} PlainOtpKind
+     * @property {{Email: string} | {Phone: string}} kind
+     */
+
+    /**
+     * Setup plain OTP as an MFA method. (SMS or Email). This is not meant to be used directly.
+     *
+     * @param {
+     *     {setup_first_mfa: PlainOtpKind} |
+     *     {setup_mfa_or_issue_token: PlainOtpKind}
+     * } args The arguments for the setup.
+     * @returns {Promise&lt;void>}
+     * @private
+     */
+    async _setup_plain_otp(args) {
+        const response = await this._fetch_with_permit(args);
+
+        /**
+         * @type {ApiResponse&lt;null>}
+         */
+        const data = await response.json();
+        this.permit = data[1];
+        this.state = STATES.VERIFY_PLAIN_OTP
+    }
+
+    /**
+     * Setup SMS OTP as an MFA method.
+     *
+     * ## Transitions To:
+     *
+     * - [Verify OTP]{@link SignupFlow.verifyOtp} - To verify that the SMS OTP is set up correctly.
+     *
+     * ## Transitioned From:
+     *
+     * - [Set Password]{@link SignupFlow.setPassword} - If the password was sufficiently complex.
+     * - [Verify OTP]{@link SignupFlow.verifyOtp} - If the OTP was valid (for setting up Email OTP).
+     * - [Verify TOTP]{@link SignupFlow.verifyTotp} - If the TOTP was valid.
+     *
+     * @param {string} phoneNumber The phone number to associate with the SMS OTP.
+     * @returns {Promise&lt;void>}
+     *
+     * @throws {InvalidStateError} If the current state is invalid for this operation.
+     * @throws {PreconditionFailedError} If the permit from either `setPassword` or any verification state has expired.
+     * @throws {HttpError} If the HTTP request fails.
+     */
+    setupSmsOtp(phoneNumber) {
+        switch (this.state) {
+            case STATES.SETUP_FIRST_MFA:
+                return this._setup_plain_otp({setup_first_mfa: {kind: {Phone: phoneNumber}}})
+            case STATES.SETUP_MFA_OR_ISSUE_TOKEN:
+                return this._setup_plain_otp({setup_mfa_or_issue_token: {kind: {Phone: phoneNumber}}})
+            default:
+                throw new InvalidStateError('Invalid state for SMS OTP setup.')
+        }
+    }
+
+    /**
+     * Setup Email OTP as an MFA method.
+     *
+     * ## Transitions To:
+     *
+     * - [Verify OTP]{@link SignupFlow.verifyOtp} - To verify that the Email OTP is set up correctly.
+     *
+     * ## Transitioned From:
+     *
+     * - [Set Password]{@link SignupFlow.setPassword} - If the password was sufficiently complex.
+     * - [Verify OTP]{@link SignupFlow.verifyOtp} - If the OTP was valid (for setting up SMS OTP).
+     * - [Verify TOTP]{@link SignupFlow.verifyTotp} - If the TOTP was valid.
+     *
+     * @param {string} email The email address to associate with the Email OTP.
+     * @returns {Promise&lt;void>}
+     *
+     * @throws {InvalidStateError} If the current state is invalid for this operation.
+     * @throws {PreconditionFailedError} If the permit from either `setPassword` or any verification state has expired.
+     * @throws {HttpError} If the HTTP request fails.
+     */
+    setupEmailOtp(email) {
+        switch (this.state) {
+            case STATES.SETUP_FIRST_MFA:
+                return this._setup_plain_otp({setup_first_mfa: {kind: {Email: email}}})
+            case STATES.SETUP_MFA_OR_ISSUE_TOKEN:
+                return this._setup_plain_otp({setup_mfa_or_issue_token: {kind: {Email: email}}})
+            default:
+                throw new InvalidStateError('Invalid state for Email OTP setup.')
+        }
+    }
+
+    /**
+     * Verify the OTP for either SMS or Email.
+     *
+     * ## Transitions To:
+     *
+     * [Issue Token]{@link SignupFlow.issueToken}
+     * | [Setup SMS OTP]{@link SignupFlow.setupSmsOtp}
+     * | [Setup Email OTP]{@link SignupFlow.setupEmailOtp}
+     * | [Setup TOTP]{@link SignupFlow.setupTotp} - If the OTP is valid the user can either finalize the signup process,
+     * This cannot transition to any setup state that it has already transitioned from.
+     *
+     * ## Transitioned From:
+     *
+     * - [Setup SMS OTP]{@link SignupFlow.setupSmsOtp}
+     * - [Setup Email OTP]{@link SignupFlow.setupEmailOtp}
+     * - [Verify OTP]{@link SignupFlow.verifyOtp} - If the OTP was invalid the user should be prompted to retry. They
+     * have 5 attempts by default.
+     *
+     * @param {string} otp The OTP to verify.
+     * @returns {Promise&lt;boolean>} A promise that resolves to true if the OTP is valid, false otherwise.
+     * If the OTP is invalid, the user should be prompted to enter the code again.
+     *
+     * @throws {InvalidStateError} If the current state is invalid (the previous state was not `setupSmsOtp` or
+     * `setupEmailOtp`).
+     * @throws {PreconditionFailedError} If the permit from `setupSmsOtp` or `setupEmailOtp` has expired or the maximum
+     * attempts have been reached.
+     * @throws {HttpError} If the HTTP request fails.
+     */
+    async verifyOtp(otp) {
+        this._checkState(STATES.VERIFY_PLAIN_OTP, 'Invalid state for OTP verification.')
+        const response = await this._fetch_with_permit({verify_plain_otp: {guess: otp}})
+
+        /**
+         * @typedef {Object} VerifyOtpResponse
+         * @property {bool} maybe_retry_plain if true, the user should be prompted to enter the code again.
+         */
+
+        /**
+         * @type {ApiResponse&lt;?VerifyOtpResponse>}
+         */
+        const data = await response.json();
+
+        this.permit = data[1];
+
+        // We don't need to check if maybe_retry_plain is true, you can think of it as a simple flag, if it is there,
+        // the user should be prompted to enter the code again.
+        if (data[0] === null) {
+            this.state = STATES.SETUP_MFA_OR_ISSUE_TOKEN;
+            return true;
+        }
+        return false
+    }
+
+    /**
+     * Issue a token for the user, finalizing the signup process.
+     *
+     * If this is not ever called, the signup process so far will have 0 impact on the system, like it never happened.
+     *
+     * ## Transitions To:
+     *
+     * - TERMINAL - The signup process is complete.
+     *
+     * ## Transitioned From:
+     *
+     * - [Verify OTP]{@link SignupFlow.verifyOtp} - If the OTP was valid.
+     * - [Verify TOTP]{@link SignupFlow.verifyTotp} - If the TOTP was valid.
+     *
+     * @returns {Promise&lt;Array&lt;number>>} A promise that resolves to the issued token.
+     *
+     * @throws {InvalidStateError} If the current state is invalid for this operation (the previous state was not
+     * an MFA verification state).
+     * @throws {HttpError} If the HTTP request fails.
+     * @throws {PreconditionFailedError} If the permit has expired.
+     */
+    async issueToken() {
+        this._checkState(STATES.SETUP_MFA_OR_ISSUE_TOKEN, 'Invalid state for issuing token.')
+        const response = await this._fetch_with_permit({setup_mfa_or_issue_token: {kind: null}});
+
+        /**
+         * @type {ApiResponse&lt;Array&lt;number>>}
+         */
+        const data = await response.json();
+        this.state = STATES.TERMINAL;
+        return data[0];
+    }
+}
+
+export default {
+    SignupFlow,
+    InsufficientPassword,
+    InvalidStateException: InvalidStateError,
+    UsernameExistsError
+}</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpError.html">HttpError</a></li><li><a href="InsufficientPassword.html">InsufficientPassword</a></li><li><a href="InvalidStateError.html">InvalidStateError</a></li><li><a href="PreconditionFailedError.html">PreconditionFailedError</a></li><li><a href="SignupFlow.html">SignupFlow</a></li><li><a href="SignupFlow_SignupFlow.html">SignupFlow</a></li><li><a href="UsernameExistsError.html">UsernameExistsError</a></li></ul><h3><a href="global.html">Global</a></h3>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.2</a> on Fri Apr 05 2024 21:14:36 GMT-0400 (Eastern Daylight Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>
