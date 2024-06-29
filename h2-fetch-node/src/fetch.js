@@ -499,5 +499,5 @@ const conn_ctx = new H2Fetch();
  * @returns {Promise<Response>}
  */
 export default function fetch(resource, options) {
-    return conn_ctx.fetch(resource, options);
+    return conn_ctx.fetch.bind(conn_ctx)(resource, options);
 }
