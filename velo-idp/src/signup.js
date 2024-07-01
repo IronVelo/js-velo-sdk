@@ -120,20 +120,30 @@ const SIGNUP_STATES = {
  */
 export default class SignupFlow extends Flow {
     /**
+     * @private
+     * @readonly
+     * @type {boolean}
+     */
+    _mfa_optional;
+
+    /**
      * Create a new SignupFlow instance.
      *
      * @param {string} [baseUrl] The base URL for the Velo API.
      * @param {Fetcher} [fetch] The `Fetcher` instance to use for requests. The endpoint for the fetcher should be
      * the base URL + '/signup'.
+     * @param {boolean} mfa_optional Whether MFA is optional or required. True indicates it being optional.
      *
      * @throws {InvalidArguments} If both `baseUrl` and `fetch` are not provided.
      */
-    constructor(baseUrl, fetch) {
+    constructor(baseUrl, fetch, mfa_optional) {
         super('/signup', 'SignupFlow', baseUrl, fetch);
+        this._mfa_optional = mfa_optional;
 
         // this is the worst language of all time, I hate you Brandon Eich. I genuinely hate you.
         this.hello.bind(this);
         this.setPassword.bind(this);
+        this.setupNoMfa.bind(this);
         this.setupTotp.bind(this);
         this.verifyTotp.bind(this);
         this.setupSmsOtp.bind(this);
@@ -145,7 +155,7 @@ export default class SignupFlow extends Flow {
     }
 
     /**
-     * @typedef {{state: SignupFlowState, permit: string}} SerializableSignupFlow
+     * @typedef {{state: SignupFlowState, permit: string, mfa_optional: boolean}} SerializableSignupFlow
      */
 
     /**
@@ -156,7 +166,8 @@ export default class SignupFlow extends Flow {
     toSerializable() {
         return {
             state: this.state,
-            permit: this.permit
+            permit: this.permit,
+            mfa_optional: this._mfa_optional
         };
     }
 
@@ -188,6 +199,7 @@ export default class SignupFlow extends Flow {
     restore(obj) {
         this._setState(obj.state);
         this._setPermit(obj.permit);
+        this._mfa_optional = obj.mfa_optional;
     }
 
     /**
@@ -486,7 +498,7 @@ export default class SignupFlow extends Flow {
     /**
      * Setup plain OTP as an MFA method. (SMS or Email). This is not meant to be used directly.
      *
-     * @param {{[SetupPlainOtpState]: PlainOtpKind}} args The arguments for the setup.
+     * @param {{[p: SetupPlainOtpState]: PlainOtpKind}} args The arguments for the setup.
      * @returns {Promise<void>}
      * @private
      */
@@ -687,6 +699,39 @@ export default class SignupFlow extends Flow {
             return true;
         }
         return false
+    }
+
+    /**
+     * Setup no MFA method for a user, finalizing the signup process and returning the user's token.
+     *
+     * **REQUIRES**: MFA must be optional, this must be set in both the SDK and the IdP must be aware of this
+     * configuration.
+     *
+     * @returns {Promise<string>} - The user's token, representing them being logged in.
+     */
+    async setupNoMfa() {
+        this._checkState(
+            SIGNUP_STATES.SETUP_FIRST_MFA,
+            'Invalid state for finalizing the signup process without any MFA. Must be SETUP_FIRST_MFA'
+        );
+
+        if (!this._mfa_optional) {
+            throw new InvalidStateError("To finalize a user's account without MFA on signup mfa_optional must be true.");
+        }
+
+        let res = await this._post_with_permit({[this.state]: {kind: null}});
+
+        /**
+         * @typedef {{issue_token: string}} IssueTokenResponse
+         */
+
+        /**
+         * @type {ApiResponse<IssueTokenResponse>}
+         */
+        const data = await res.json();
+
+        this._setState(SIGNUP_STATES.TERMINAL);
+        return data.ret.issue_token;
     }
 
     /**

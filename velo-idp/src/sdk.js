@@ -30,6 +30,12 @@ export class SdkBuilder {
     _password;
 
     /**
+     * @type {boolean}
+     * @private
+     */
+    _mfa_optional;
+
+    /**
      * Create a new SdkBuilder.
      */
     constructor() {
@@ -37,6 +43,7 @@ export class SdkBuilder {
         this._port = 443;
         this._fetcher = null;
         this._password = true;
+        this._mfa_optional = false;
     }
 
     /**
@@ -90,6 +97,18 @@ export class SdkBuilder {
     }
 
     /**
+     * Declare whether MFA is optional or required. MFA is required by default. Updating this setting will not
+     * update the IdP's configuration, but ensure the SDK is in sync with the IdP.
+     *
+     * @param {boolean} is_optional - Whether MFA is optional or not.
+     * @returns {SdkBuilder}
+     */
+    mfaOptional(is_optional) {
+        this._mfa_optional = is_optional;
+        return this;
+    }
+
+    /**
      * Transform the base URL to have the correct protocol.
      *
      * @param {string | null} baseUrl - The base URL to transform and check
@@ -126,7 +145,7 @@ export class SdkBuilder {
         let baseUrl = this._transform_check_base_url(this._baseUrl);
         let fetcher = new Fetcher(`${baseUrl}:${this._port}`, this._fetcher);
 
-        return new VeloSdk(baseUrl, fetcher, this._password);
+        return new VeloSdk(baseUrl, fetcher, this._password, this._mfa_optional);
     }
 }
 
@@ -155,16 +174,25 @@ export class VeloSdk {
     _password;
 
     /**
+     * @type {boolean}
+     * @private
+     * @readonly
+     */
+    _mfa_optional;
+
+    /**
      * Create a new VeloSdk.
      *
      * @param {string} baseUrl - The base URL of the Identity Provider (IdP)
      * @param {Fetcher} fetcher - The fetcher to use for requests
      * @param {boolean} password - Whether you're using passwords or not
+     * @param {boolean} mfa_optional - Whether MFA is optional or not. (true denotes this being optional)
      */
-    constructor(baseUrl, fetcher, password) {
+    constructor(baseUrl, fetcher, password, mfa_optional) {
         this._baseUrl = baseUrl;
         this._fetcher = fetcher;
         this._password = password;
+        this._mfa_optional = mfa_optional;
 
         this.signup.bind(this);
         this.login.bind(this);
@@ -179,7 +207,7 @@ export class VeloSdk {
      * @returns {SignupFlow}
      */
     signup() {
-        return new SignupFlow(this._baseUrl, this._fetcher);
+        return new SignupFlow(this._baseUrl, this._fetcher, this._mfa_optional);
     }
 
     /**
@@ -188,7 +216,7 @@ export class VeloSdk {
      * @returns {LoginFlow}
      */
     login() {
-        return new LoginFlow(this._baseUrl, this._fetcher);
+        return new LoginFlow(this._baseUrl, this._fetcher, this._mfa_optional);
     }
 
     /**

@@ -67,6 +67,80 @@ const SMS = 'Sms';
 const EMAIL = 'Email';
 
 /**
+ * The response of the ingress flow. If MFA is non-optional you must always continue the flow.
+ *
+ * @property {string | null} token - non-null if the user has not set MFA up and MFA is optional.
+ *
+ * @property {Array<MfaType>} mfa_kinds - non-empty if the user has set MFA up, this can never be non-empty if `token`
+ *   is not `null`. This array includes the supported MFA kinds.
+ *
+ * @property {boolean} complete - If MFA is optional and the user has not set MFA up. If this is true it indicates that
+ *   the token is not `null`.
+ */
+export class HelloResult {
+    /**
+     * @readonly
+     * @type {string | null}
+     */
+    token;
+
+    /**
+     * @readonly
+     * @type {Array<MfaType>}
+     */
+    mfa_kinds;
+
+    /**
+     * @readonly
+     * @type {boolean}
+     *
+     * If the login process is complete, indicating that the user had not set MFA up and that the `token` property is
+     * non-null.
+     */
+    complete
+
+    /**
+     * @private
+     * @param {string | null} token
+     * @param {Array<MfaType>} mfa_kinds
+     */
+    constructor(token, mfa_kinds) {
+        if (token !== null && mfa_kinds.length !== 0) {
+            // Impossibility, no need for a custom error.
+            throw new InvalidArguments(
+                "Impossibility, user had MFA kinds but also was logged in. " +
+                "This would indicate a network error, a really weird one."
+            );
+        }
+
+        this.complete = token !== null;
+        this.token = token;
+        this.mfa_kinds = mfa_kinds;
+    }
+
+    /**
+     * The user had no MFA kinds and MFA is optional, their token is returned and stored in `token`.
+     *
+     * @param {string} token
+     * @returns {HelloResult}
+     */
+    static Token(token) {
+        return new HelloResult(token, []);
+    }
+
+    /**
+     * The user had MFA setup, they must continue the flow. The MFA kinds they have already set are stored in the
+     * `mfa_kinds` property.
+     *
+     * @param {Array<MfaType>} mfa_kinds
+     * @returns {HelloResult}
+     */
+    static NeedsMfa(mfa_kinds) {
+        return new HelloResult(null, mfa_kinds);
+    }
+}
+
+/**
  * @class LoginFlow
  * @classdesc A class for handling a login flow.
  *
@@ -79,16 +153,25 @@ const EMAIL = 'Email';
  */
 export default class LoginFlow extends Flow {
     /**
+     * @private
+     * @readonly
+     * @type {boolean}
+     */
+    _mfa_optional;
+
+    /**
      * Create a new LoginFlow.
      *
      * @param {string} [baseUrl] The base URL for the Velo API.
      * @param {Fetcher} [fetch] The fetcher to use for requests. The endpoint for the fetcher should be the base URL +
      * '/login'.
+     * @param {boolean} mfa_optional Whether MFA is optional or required. True indicates it being optional.
      *
      * @throws {InvalidArguments} If both `baseUrl` and `fetch` are not provided.
      */
-    constructor(baseUrl, fetch) {
+    constructor(baseUrl, fetch, mfa_optional) {
         super('/login', 'LoginFlow', baseUrl, fetch);
+        this._mfa_optional = mfa_optional;
         this.mfaTypes = [];
 
         // this is the worst language of all time, I hate you Brandon Eich. I genuinely hate you.
@@ -183,7 +266,7 @@ export default class LoginFlow extends Flow {
      *
      * @param {string} username The username to log in with.
      * @param {string} password The password to log in with.
-     * @returns {Promise<Array<MfaType>>} The types of MFA that are available.
+     * @returns {Promise<HelloResult>} The types of MFA that are available.
      *
      * @throws {InvalidStateError} If the current state is not INIT.
      * @throws {HttpError} If the request fails.
@@ -202,17 +285,26 @@ export default class LoginFlow extends Flow {
          */
 
         /**
-         * @type {ApiResponse<MfaTypesResponse>}
+         * @typedef {{issue_token: string}} IssueTokenResponse
+         */
+
+        /**
+         * @type {ApiResponse<MfaTypesResponse | any | IssueTokenResponse>}
          */
         const data = await response.json();
 
         LoginFlow._checkResponse(data, (failure) => new LoginError(failure));
 
+        if (this._mfa_optional && data.ret["issue_token"] !== undefined) {
+            this._setState(LOGIN_STATES.TERMINAL);
+            return HelloResult.Token(data.ret.issue_token);
+        }
+
         this._setState(LOGIN_STATES.INIT_MFA);
         this._setPermit(data.permit);
         this.mfaTypes = data.ret.hello_login;
 
-        return this.mfaTypes;
+        return HelloResult.NeedsMfa(this.mfaTypes);
     }
 
     /**
@@ -237,7 +329,7 @@ export default class LoginFlow extends Flow {
 
         const response = await this._post_with_permit({[this.state]: { kind: mfaType }});
         /**
-         * @type {ApiResponse<null>}
+         * @type {ApiResponse<null | any>}
          */
         const data = await response.json();
 
@@ -363,7 +455,7 @@ export default class LoginFlow extends Flow {
      * - [Prepare TOTP]{@link LoginFlow.prepareTotp} - If the user has set up TOTP as a mode of MFA.
      *
      * @param {string} code The code to check.
-     * @returns {Array<Number> | null} - The token if successful, `void` if the user must retry.
+     * @returns {string | null} - The token if successful, `void` if the user must retry.
      *
      * @throws {InvalidStateError} If the current state is not CHECK_SIMPLE_MFA | CHECK_TOTP.
      * @throws {HttpError} If the request fails.
@@ -382,7 +474,7 @@ export default class LoginFlow extends Flow {
 
         /**
          * @typedef {Object} VerifyOtpResponse
-         * @property {Array<number>} [issue_token] The token representing the user.
+         * @property {string} [issue_token] The token representing the user.
          * @property {any} [incorrect_otp] The OTP was incorrect, retry.
          */
 

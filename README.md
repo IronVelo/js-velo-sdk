@@ -120,3 +120,54 @@ async function useSdkExample() {
     await conn.close();
 }
 ```
+
+## Optional MFA
+
+MFA by default is a required, if you don't want this both the IdP and the SDK must be aware of this. If you've 
+previously expressed you want MFA to be optional, then the provided IdP will respect this. 
+
+### Enabling for the SDK
+
+```js
+let sdk = new SdkBuilder()
+    // Set the fetch method
+    .fetch(Function.prototype.bind.call(window.fetch, window))
+    // Tell the SDK which port to connect to
+    .port(0 /* The port we sent you directly */)
+    // The baseUrl we provided directly ...
+    .baseUrl("https://the_url_we_sent_you_directly")
+    // Express that MFA is optional
+    .mfaOptional(true)
+    // Finally construct the SDK
+    .build();
+```
+
+Now, you can create a user without MFA:
+
+```js
+let signup_flow = sdk.signup();
+
+await signup_flow.hello("desired-username");
+await signup_flow.setPassword("Password1234!");
+
+// finish the flow
+let token = await signup_flow.setupNoMfa();
+```
+
+Logging in for a user without MFA:
+
+```js
+let login_flow = sdk.login();
+
+let result = await login_flow.hello("desired-username", "Passwod1234!");
+
+if (result.complete) {
+    // the user has not set MFA up, so we are finished the flow.
+    let token = result.token;
+} else {
+    // the user set up MFA, the supported MFA kinds are returned.
+    let mfa_kinds = result.mfa_kinds;
+    
+    // continue the flow ...
+}
+```

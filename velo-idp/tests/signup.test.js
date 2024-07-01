@@ -1,4 +1,4 @@
-import {getTotp, makeSdk, makeFetch} from "./t_utils";
+import {getTotp, makeSdk, makeFetch, makeInsecureSdk} from "./t_utils";
 import { UsernameExistsError, InsufficientPassword } from "../src";
 
 test('signup-username-exists', async () => {
@@ -85,6 +85,24 @@ test('signup-user-success', async () => {
     let {user_id, token} = await sdk.verifyToken(Buffer.from(oToken, "base64"));
 
     await sdk.delete(token).hello("suc-user")
+        .then((state) => state.password("Password1234!"))
+        .then((state) => state.confirm());
+
+    await fetch.close();
+});
+
+test('signup-user-success-no-mfa', async () => {
+    let fetch = makeFetch();
+    let sdk = makeInsecureSdk(fetch.fetch.bind(fetch));
+
+    let signup_flow = sdk.signup();
+
+    await signup_flow.hello("suc-user-no-mfa");
+    await signup_flow.setPassword("Password1234!");
+
+    let token = await signup_flow.setupNoMfa();
+
+    await sdk.delete(token).hello("suc-user-no-mfa")
         .then((state) => state.password("Password1234!"))
         .then((state) => state.confirm());
 

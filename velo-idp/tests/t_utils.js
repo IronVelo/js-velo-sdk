@@ -41,6 +41,22 @@ export function makeSdk(fetch) {
 }
 
 /**
+ * Create a new SDK with a less-secure configuration.
+ * @param {function(string, Object): Promise<Response>} fetch
+ * @returns {VeloSdk}
+ */
+export function makeInsecureSdk(fetch) {
+    let {bUrl, port} = fromEnv();
+
+    return new SdkBuilder()
+        .fetch(fetch)
+        .port(port)
+        .mfaOptional(true)
+        .baseUrl(bUrl)
+        .build();
+}
+
+/**
  * Get the current TOTP from a provisioning URI.
  *
  * @param {string} uri The provisioning URI.
