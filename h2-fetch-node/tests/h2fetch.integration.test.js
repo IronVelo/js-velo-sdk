@@ -1,9 +1,19 @@
 import { H2Fetch } from "../src";
+import path from "node:path";
 
 test('can communicate', async () => {
-    let client = new H2Fetch();
+    let client = new H2Fetch({
+        tls_path: path.join(process.env.HOME, "unsafe-dev-certificate.pem")
+    });
 
-    let res = await client.fetch("https://example.local:3069/login", {
+    if (!process.env.IV_DEV_B_URL || !process.env.IV_DEV_PORT) {
+        console.error('Environment variables IV_DEV_B_URL and IV_DEV_PORT must be set');
+        process.exit(1);
+    }
+
+    let url = `${process.env["IV_DEV_B_URL"]}:${process.env["IV_DEV_PORT"]}/login`;
+
+    let res = await client.fetch(url, {
         method: "POST",
         body: JSON.stringify({
             args: {

@@ -1,6 +1,7 @@
 import http2 from "http2";
 import { Readable, Transform } from "stream"
 import { StringDecoder } from "string_decoder";
+import fs from "node:fs";
 
 /**
  * @typedef {import("http2").ClientHttp2Session} ClientHttp2Session
@@ -238,6 +239,8 @@ export class Response {
     }
 }
 
+// TODO: reset connections on critical errors.
+
 /**
  * @class H2Fetch
  * @classdesc A class for fetching resources using HTTP/2.
@@ -256,11 +259,25 @@ export class H2Fetch {
     baseUrl;
 
     /**
-     * Create a new H2Fetch.
+     * @typedef {{[tls_path]: string}} ConnConfig
      */
-    constructor() {
+
+    /**
+     * @type ConnConfig
+     * @private
+     * @readonly
+     */
+    conf;
+
+    /**
+     * Create a new H2Fetch.
+     *
+     * @param {ConnConfig}[conf] - Connection configuration
+     */
+    constructor(conf) {
         this.conn = null;
         this.baseUrl = null;
+        this.conf = conf || { tls_path: undefined };
 
         this._get_conn.bind(this);
         this.fetch.bind(this);
@@ -269,13 +286,22 @@ export class H2Fetch {
 
     /**
      * @param {string} url
+     * @param {ConnConfig} conf
      * @returns {Promise<ClientHttp2Session>}
      * @private
      * @static
      */
-    static _connect(url) {
+    static _connect(url, conf) {
         return new Promise((res, rej) => {
-            let conn = http2.connect(url);
+            let conn;
+
+            if (conf.tls_path !== undefined) {
+                conn = http2.connect(url, {
+                    ca: fs.readFileSync(conf.tls_path)
+                })
+            } else {
+                conn = http2.connect(url);
+            }
 
             H2Fetch._err_handler(conn, rej);
             H2Fetch._close_handler(conn, rej);
@@ -298,14 +324,14 @@ export class H2Fetch {
     _get_conn(baseUrl) {
         if (this.conn == null || this.conn.closed) {
             this.baseUrl = baseUrl;
-            return H2Fetch._connect(baseUrl).then((conn) => {
+            return H2Fetch._connect(baseUrl, this.conf).then((conn) => {
                 this.conn = conn;
                 return conn;
             });
         } else if (this.baseUrl !== baseUrl) {
             this.conn.close();
             this.baseUrl = baseUrl;
-            return H2Fetch._connect(baseUrl).then((conn) => {
+            return H2Fetch._connect(baseUrl, this.conf).then((conn) => {
                 this.conn = conn;
                 return conn;
             });

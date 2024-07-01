@@ -1,15 +1,14 @@
-import { H2Fetch } from "../../h2-fetch-node/src/index.js";
-import {getTotp, makeSdk} from "./t_utils";
+import {getTotp, makeSdk, makeFetch} from "./t_utils";
 import { UsernameExistsError, InsufficientPassword } from "../src";
 
 test('signup-username-exists', async () => {
-    let fetch = new H2Fetch();
+    let fetch = makeFetch();
     let sdk = makeSdk(fetch.fetch.bind(fetch));
 
     try {
         await sdk.signup().hello("bob");
     } catch (e) {
-        fetch.close();
+        await fetch.close();
         if (e instanceof UsernameExistsError) {
             expect(e.message).toBe("Username bob already exists.");
         } else {
@@ -24,7 +23,7 @@ test('signup-username-exists', async () => {
  * @param {function(InsufficientPassword): void} inspectErr
  */
 async function check_insufficient(username, password, inspectErr) {
-    let fetch = new H2Fetch();
+    let fetch = makeFetch();
     let sdk = makeSdk(fetch.fetch.bind(fetch));
 
     let signup_flow = sdk.signup();
@@ -33,7 +32,7 @@ async function check_insufficient(username, password, inspectErr) {
         await signup_flow.hello(username);
         await signup_flow.setPassword(password);
     } catch (e) {
-        fetch.close();
+        await fetch.close();
         if (e instanceof InsufficientPassword) {
             inspectErr(e);
         } else {
@@ -66,7 +65,7 @@ test('signup-password-insufficient', async () => {
 });
 
 test('signup-user-success', async () => {
-    let fetch = new H2Fetch();
+    let fetch = makeFetch();
     let sdk = makeSdk(fetch.fetch.bind(fetch));
 
     let signup_flow = sdk.signup();
@@ -89,5 +88,5 @@ test('signup-user-success', async () => {
         .then((state) => state.password("Password1234!"))
         .then((state) => state.confirm());
 
-    fetch.close();
+    await fetch.close();
 });

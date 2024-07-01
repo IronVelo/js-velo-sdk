@@ -1,9 +1,8 @@
 import {LoginError} from "../src";
-import { H2Fetch } from "../../h2-fetch-node/src/index.js";
-import { makeSdk } from "./t_utils";
+import { makeSdk, makeFetch } from "./t_utils";
 
 test('login-username-exists', async () => {
-    let fetch = new H2Fetch();
+    let fetch = makeFetch();
     let sdk = makeSdk(fetch.fetch.bind(fetch));
 
     try {
@@ -11,16 +10,16 @@ test('login-username-exists', async () => {
     } catch (e) {
         if (e instanceof LoginError) {
             expect(e.kind).toBe("UsernameNotFound");
-            fetch.close();
+            await fetch.close();
         } else {
-            fetch.close();
+            await fetch.close();
             throw e;
         }
     }
 });
 
 test('login-invalid-password', async () => {
-    let fetch = new H2Fetch();
+    let fetch = makeFetch();
     let sdk = makeSdk(fetch.fetch.bind(fetch));
 
     try {
@@ -28,16 +27,16 @@ test('login-invalid-password', async () => {
     } catch (e) {
         if (e instanceof LoginError) {
             expect(e.kind).toBe("IncorrectPassword");
-            fetch.close();
+            await fetch.close();
         } else {
-            fetch.close();
+            await fetch.close();
             throw e;
         }
     }
 });
 
 test('correct-password-wrong-otp', async () => {
-    let fetch = new H2Fetch();
+    let fetch = makeFetch();
     let sdk = makeSdk(fetch.fetch.bind(fetch));
 
     let login_flow = sdk.login();
@@ -46,5 +45,5 @@ test('correct-password-wrong-otp', async () => {
 
     let maybe_token = await login_flow.verifyOtp("12345678");
     expect(maybe_token).toBeNull();
-    fetch.close();
+    await fetch.close();
 });

@@ -1,5 +1,29 @@
 import {SdkBuilder} from "../src";
+import {H2Fetch} from "../../h2-fetch-node";
 import {TOTP} from "totp-generator";
+import path from "node:path";
+
+/**
+ * @returns {H2Fetch}
+ */
+export function makeFetch() {
+    return new H2Fetch({
+        tls_path: path.join(process.env.HOME, "unsafe-dev-certificate.pem")
+    });
+}
+
+/**
+ * Get the URL and port from the env
+ * @returns {{bUrl: string, port: number}}
+ */
+export function fromEnv() {
+    if (!process.env.IV_DEV_B_URL || !process.env.IV_DEV_PORT) {
+        console.error('Environment variables `IV_DEV_B_URL` and `IV_DEV_PORT` must be set');
+        process.exit(1);
+    }
+
+    return {bUrl: process.env.IV_DEV_B_URL, port: parseInt(process.env.IV_DEV_PORT)}
+}
 
 /**
  * Create a new SDK.
@@ -7,10 +31,12 @@ import {TOTP} from "totp-generator";
  * @returns {VeloSdk}
  */
 export function makeSdk(fetch) {
+    let {bUrl, port} = fromEnv();
+
     return new SdkBuilder()
         .fetch(fetch)
-        .port(3069)
-        .baseUrl("https://example.local")
+        .port(port)
+        .baseUrl(bUrl)
         .build();
 }
 

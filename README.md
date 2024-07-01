@@ -80,3 +80,43 @@ compromised, the `revokeTokens` API should be used to log out of all sessions.
 ```js
 await velo_sdk.revokeTokens(users_token);
 ```
+
+## Connecting to the Development Server
+
+```js
+/**
+ * Create an SDK instance connected to the development server.
+ *
+ * @returns {{sdk: VeloSdk, conn: H2Fetch}}
+ */
+function createDevSdkExample() {
+    let conn = new H2Fetch({
+        // path to the CA certificate we provided to you directly.
+        tls_path: path.join(process.env.HOME, "unsafe-dev-certificate.pem")
+    })
+
+    let sdk = new SdkBuilder()
+        // First, we set the fetcher, as the default is window.fetch which is not accessible from node
+        .fetch(conn.fetch.bind(conn /* bind to the H2Fetch instance. */))
+        // Tell the SDK which port to connect to
+        .port(0 /* The port we sent you directly */)
+        // The baseUrl we provided directly ...
+        .baseUrl("https://the_url_we_sent_you_directly")
+        // Finally construct the SDK
+        .build();
+
+    return {sdk, conn}
+}
+
+async function useSdkExample() {
+    let {sdk, conn} = createDevSdkExample();
+
+    // use the sdk directly, for example:
+    await sdk.verifyToken(Buffer.from("some token here", "base64"));
+
+    // close the connection if in a test, as jest will hang with any handles open. You won't need to do this in 
+    // production, as h2 connections can be reused and support multiplexing. TCP and TLS handshakes are many hops that 
+    // should in a perfect world happen only on your server or serverless function's startup.
+    await conn.close();
+}
+```
